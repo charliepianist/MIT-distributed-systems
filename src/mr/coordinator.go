@@ -18,7 +18,7 @@ type Coordinator struct {
 	finishedMaps     []bool
 	finishedReduces  []bool
 	totalMaps        int
-	mapsDone         chan struct{} // Are all the maps done?
+	mapsDone         chan struct{} // Once all maps done, permanently full
 	remainingMaps    chan int
 	remainingReduces chan int
 }
@@ -36,6 +36,7 @@ func (c *Coordinator) Schedule(args *ScheduleArgs, reply *ScheduleReply) error {
 	case <-c.mapsDone:
 		// Reduce
 		workerNum := <-c.remainingReduces
+		c.mapsDone <- struct{}{}
 
 		// input flies are known at this point
 		inputFiles := make([]string, c.totalMaps)
