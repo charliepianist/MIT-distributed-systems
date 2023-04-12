@@ -1,10 +1,14 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +28,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -33,9 +36,86 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	// Figure out what this worker should do
+	reply := ScheduleReply{}
+	CallSchedule(&reply)
 
+	if reply.IsReduce {
+		kva := make([]KeyValue, 10)
+		for _, filename := range reply.InputFiles {
+			// Decode file
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatalf("Cannot open %v", filename)
+			}
+			dec := json.NewDecoder(file)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				kva = append(kva, kv)
+			}
+		}
+
+		// Sort key-value pairs by key
+	} else {
+		// Map
+		// Read file, apply map function
+		inputFile := reply.InputFiles[0]
+		file, err := os.Open(inputFile)
+		if err != nil {
+			log.Fatalf("Cannot open %v", inputFile)
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("Cannot read %v", inputFile)
+		}
+		file.Close()
+		kva := mapf(inputFile, string(content))
+
+		// Save to file
+		encoders := make([]*json.Encoder, reply.NReduce)
+		// Open all files
+		for i := range encoders {
+			filename := fmt.Sprintf("mr-%d-%d", reply.WorkerNum, i)
+			file, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Fatalf("Cannot open file %v", filename)
+			}
+			defer file.Close()
+			encoders[i] = json.NewEncoder(file)
+		}
+		// Write to files
+		for _, keyValue := range kva {
+			key := keyValue.Key
+			hash := ihash(key) % reply.NReduce
+			encoder := encoders[hash]
+			err := encoder.Encode(&keyValue)
+			if err != nil {
+				log.Fatalf("Failed to write %v to %v", keyValue, encoder)
+			}
+		}
+
+		CallCompletion(false, reply.WorkerNum)
+	}
+}
+
+func CallSchedule(reply *ScheduleReply) {
+	args := ScheduleArgs{}
+	ok := call("Coordinator.Schedule", &args, reply)
+	if !ok {
+		fmt.Printf("Call to schedule failed!\n")
+	}
+}
+
+func CallCompletion(isReduce bool, workerNum int) {
+	args := CompletionArgs{IsReduce: isReduce, WorkerNum: workerNum}
+	reply := CompletionReply{}
+	ok := call("Coordinator.Completion", &args, reply)
+	if !ok {
+		fmt.Printf("Call to completion failed!\n")
+	}
 }
 
 //

@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -24,6 +26,23 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type ScheduleArgs struct {
+}
+
+type ScheduleReply struct {
+	IsReduce   bool     // Map if false, Reduce if true
+	InputFiles []string // just the "split" for map, otherwise all map workers' outputs
+	NReduce    int
+	WorkerNum  int // Which worker is this? 0 < workerNum < nReduce for reduce
+}
+
+type CompletionArgs struct {
+	IsReduce  bool
+	WorkerNum int
+}
+
+type CompletionReply struct {
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
