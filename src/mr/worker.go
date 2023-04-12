@@ -159,7 +159,7 @@ func CallSchedule(reply *ScheduleReply) {
 func CallCompletion(isReduce bool, workerNum int) {
 	args := CompletionArgs{IsReduce: isReduce, WorkerNum: workerNum}
 	reply := CompletionReply{}
-	ok := call("Coordinator.Completion", &args, reply)
+	ok := call("Coordinator.Completion", &args, &reply)
 	if !ok {
 		fmt.Printf("Call to completion failed!\n")
 	}
