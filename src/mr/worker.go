@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 //
@@ -17,6 +18,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -59,6 +68,44 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 
 		// Sort key-value pairs by key
+		sort.Sort(ByKey(kva))
+
+		// Create temp file
+		file, err := ioutil.TempFile("", fmt.Sprintf("reduce-%v", reply.WorkerNum))
+		if err != nil {
+			log.Fatalf("Could not create temp file for worker %v", reply.WorkerNum)
+		}
+
+		// write to temp file
+		i := 0
+		for i < len(kva) {
+			j := i + 1
+			for j < len(kva) && kva[j].Key == kva[i].Key {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				// IMPORTANT: dedupe (intermediate files may have duplicates on crashes)
+				if k > i && kva[k-1].Value == kva[k].Value {
+					continue
+				}
+				values = append(values, kva[k].Value)
+			}
+			output := reducef(kva[i].Key, values)
+
+			// this is the correct format for each line of Reduce output.
+			fmt.Fprintf(file, "%v %v\n", kva[i].Key, output)
+			i = j
+		}
+		// Move to permanent
+		permanent_filename := fmt.Sprintf("mr-out-%d", reply.WorkerNum)
+		err = os.Rename(file.Name(), permanent_filename)
+		if err != nil {
+			log.Fatalf("Failed to rename %v to %v", file.Name(), permanent_filename)
+		}
+
+		// Inform coordinator that we have finished
+		CallCompletion(true, reply.WorkerNum)
 	} else {
 		// Map
 		// Read file, apply map function
