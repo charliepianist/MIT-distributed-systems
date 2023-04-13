@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
@@ -24,6 +25,15 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+
+func sendToChan(ch chan int, val int, sec int, mu *sync.Mutex, hasFinished *bool) {
+	time.Sleep(time.Duration(sec) * time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	if !*hasFinished {
+		ch <- val
+	}
+}
 
 //
 // Workers will query the scheduler to figure out what they should do.
@@ -46,11 +56,15 @@ func (c *Coordinator) Schedule(args *ScheduleArgs, reply *ScheduleReply) error {
 		reply.IsReduce = true
 		reply.InputFiles = inputFiles
 		reply.WorkerNum = workerNum
+		// In 10 seconds, assume worker has failed if task hasn't finished
+		go sendToChan(c.remainingReduces, workerNum, 10, &c.mu, &c.finishedReduces[workerNum])
 	case workerNum := <-c.remainingMaps:
 		// Map
 		reply.IsReduce = false
 		reply.InputFiles = []string{c.files[workerNum]}
 		reply.WorkerNum = workerNum
+		// In 10 seconds, assume worker has failed
+		go sendToChan(c.remainingMaps, workerNum, 10, &c.mu, &c.finishedMaps[workerNum])
 	}
 	return nil
 }
@@ -114,6 +128,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	ret := areAllDone(c.finishedReduces)
 
 	return ret
@@ -126,11 +141,13 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	remainingMaps := make(chan int, len(files))
-	remainingReduces := make(chan int, len(files))
-	mapsDone := make(chan struct{})
+	remainingReduces := make(chan int, nReduce)
+	mapsDone := make(chan struct{}, 1)
 	// Initially, everything still has to be done
 	for i := range files {
 		remainingMaps <- i
+	}
+	for i := 0; i < nReduce; i++ {
 		remainingReduces <- i
 	}
 	c := Coordinator{
