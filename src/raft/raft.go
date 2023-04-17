@@ -98,6 +98,7 @@ type Raft struct {
 func (rf *Raft) updateTermAndReset(newTerm int) {
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
+	rf.role = FOLLOWER
 }
 
 // return currentTerm and whether this server
@@ -195,6 +196,25 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	// If candidate behind this one
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+
+	// If behind, vote yes and return
+	if args.Term > rf.currentTerm {
+		rf.updateTermAndReset(args.Term)
+		rf.votedFor = args.CandidateId
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = true
+		return
+	}
+
+	// Check if at least as up to date
+	// TODO: implement
+	if args.LastLog
 }
 
 //
@@ -289,6 +309,7 @@ func (rf *Raft) heartbeat() {
 	now := time.Now()
 	if now.Sub(rf.lastSentAppendEntries).Milliseconds() > int64(HEARTBEAT_MS) {
 		// TODO: Send heartbeat
+		rf.lastSentAppendEntries = time.Now()
 	}
 	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
 	rf.heartbeat()
@@ -297,6 +318,10 @@ func (rf *Raft) heartbeat() {
 func (rf *Raft) requestOneVote(server int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	// Don't do anything if no longer candidate
+	if rf.role != CANDIDATE {
+		return
+	}
 
 	lastLog := rf.log[len(rf.log)-1]
 	args := RequestVoteArgs{
@@ -310,8 +335,7 @@ func (rf *Raft) requestOneVote(server int) {
 
 	// If term is greater, switch back to follower
 	if reply.Term > rf.currentTerm {
-		rf.role = FOLLOWER
-		rf.currentTerm = reply.Term
+		rf.updateTermAndReset(reply.Term)
 	}
 	rf.hasVote[server] = reply.VoteGranted
 
@@ -325,6 +349,7 @@ func (rf *Raft) requestOneVote(server int) {
 	}
 	if numVotes >= majority {
 		rf.role = LEADER
+		rf.heartbeat()
 	}
 }
 
