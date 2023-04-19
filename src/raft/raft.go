@@ -444,10 +444,10 @@ func (rf *Raft) killed() bool {
 // Sends heartbeats automatically if leader
 func (rf *Raft) heartbeat() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	// Stop if not leader
 	if rf.role != LEADER {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -459,11 +459,13 @@ func (rf *Raft) heartbeat() {
 			rf.lastSentAppendEntries[i] = now
 			if rf.role != LEADER {
 				// This means we have become follower again
+				rf.mu.Unlock()
 				return
 			}
 		}
 	}
 	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
+	rf.mu.Unlock()
 	rf.heartbeat()
 }
 
