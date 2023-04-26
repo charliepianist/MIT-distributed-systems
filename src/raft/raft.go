@@ -40,7 +40,7 @@ var TRACE int = 0
 var HEARTBEAT_MS int = 150
 var ELECTION_TIMEOUT_MS_MIN int = 600
 var ELECTION_TIMEOUT_MS_MAX int = 750
-var RETRY_APPEND_ENTRIES int = 250
+var RETRY_APPEND_ENTRIES int = 70
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
@@ -134,7 +134,7 @@ func (rf *Raft) print(verbosity int, str string, a ...interface{}) {
 
 	now := time.Now()
 	timeStr := now.Format("15:04:05.000")
-	s := fmt.Sprintf("[%v] %v - %v (%v) - %v\n", verbosityStr, timeStr, rf.me, roleStr, str)
+	s := fmt.Sprintf("[%v] %v - %v (%v, Term %v) - %v\n", verbosityStr, timeStr, rf.me, roleStr, rf.currentTerm, str)
 	fmt.Printf(s, a...)
 }
 
@@ -338,6 +338,11 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 	// Run until successful
 	for {
+		// Or no longer leader
+		if rf.role != LEADER {
+			return
+		}
+
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -494,7 +499,9 @@ func (rf *Raft) heartbeatOne(server int) {
 // Sends heartbeats automatically if leader
 func (rf *Raft) heartbeat() {
 	for i := range rf.lastSentAppendEntries {
-		go rf.heartbeatOne(i)
+		if i != rf.me {
+			go rf.heartbeatOne(i)
+		}
 	}
 }
 
