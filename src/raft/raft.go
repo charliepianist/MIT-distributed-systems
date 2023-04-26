@@ -40,7 +40,7 @@ var TRACE int = 0
 var HEARTBEAT_MS int = 150
 var ELECTION_TIMEOUT_MS_MIN int = 600
 var ELECTION_TIMEOUT_MS_MAX int = 750
-var RETRY_APPEND_ENTRIES int = 70
+var RETRY_APPEND_ENTRIES int = 225
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
@@ -255,7 +255,7 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	defer rf.print(INFO, "Received RequestVote with term %v reply %v (existing term %v)", args.Term, reply, rf.currentTerm)
+	rf.print(INFO, "Received RequestVote from %v with term %v (existing term %v)", args.CandidateId, args.Term, rf.currentTerm)
 	// Your code here (2A, 2B).
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -580,6 +580,7 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock() // Lock so weird things don't happen
 				rf.role = CANDIDATE
 				rf.currentTerm++
+				rf.print(INFO, "becoming candidate!")
 
 				// Vote for self
 				rf.votedFor = rf.me
