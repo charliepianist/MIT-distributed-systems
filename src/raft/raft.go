@@ -30,9 +30,17 @@ import (
 	"6.824/labrpc"
 )
 
+var LOG_VERBOSITY int = INFO
+var ERROR int = 4
+var WARN int = 3
+var INFO int = 2
+var DEBUG int = 1
+var TRACE int = 0
+
 var HEARTBEAT_MS int = 150
 var ELECTION_TIMEOUT_MS_MIN int = 600
 var ELECTION_TIMEOUT_MS_MAX int = 750
+var RETRY_APPEND_ENTRIES int = 250
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
@@ -96,7 +104,11 @@ type Raft struct {
 	hasVote []bool
 }
 
-func (rf *Raft) print(str string, a ...interface{}) {
+func (rf *Raft) print(verbosity int, str string, a ...interface{}) {
+	if verbosity < LOG_VERBOSITY {
+		return
+	}
+
 	roleStr := ""
 	switch rf.role {
 	case LEADER:
@@ -106,9 +118,23 @@ func (rf *Raft) print(str string, a ...interface{}) {
 	case CANDIDATE:
 		roleStr = "Candidate"
 	}
+	verbosityStr := ""
+	switch verbosity {
+	case ERROR:
+		verbosityStr = "ERROR"
+	case WARN:
+		verbosityStr = "WARN"
+	case INFO:
+		verbosityStr = "INFO"
+	case DEBUG:
+		verbosityStr = "DEBUG"
+	case TRACE:
+		verbosityStr = "TRACE"
+	}
+
 	now := time.Now()
 	timeStr := now.Format("15:04:05.000")
-	s := fmt.Sprintf("%v - %v (%v) - %v\n", timeStr, rf.me, roleStr, str)
+	s := fmt.Sprintf("[%v] %v - %v (%v) - %v\n", verbosityStr, timeStr, rf.me, roleStr, str)
 	fmt.Printf(s, a...)
 }
 
@@ -229,7 +255,7 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	defer rf.print("Received RequestVote with term %v reply %v (existing term %v)", args.Term, reply, rf.currentTerm)
+	defer rf.print(INFO, "Received RequestVote with term %v reply %v (existing term %v)", args.Term, reply, rf.currentTerm)
 	// Your code here (2A, 2B).
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -321,10 +347,13 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
-		rf.print("Sending appendEntries to %v (%v)", server, args)
+		rf.print(DEBUG, "Sending appendEntries to %v (%v)", server, args)
 		ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 		if !ok {
-			fmt.Printf("%v (leader) - failed to contact server %v for AppendEntries %v\n", rf.me, server, args)
+			rf.print(DEBUG, "failed to contact server %v for AppendEntries %v\n", rf.me, server, args)
+			// Wait (don't send more heartbeats) and retry
+			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
+			continue
 		}
 
 		// update next/matchIndex if successful
@@ -441,8 +470,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// Sends heartbeats automatically if leader
-func (rf *Raft) heartbeat() {
+func (rf *Raft) heartbeatOne(server int) {
 	rf.mu.Lock()
 
 	// Stop if not leader
@@ -452,21 +480,22 @@ func (rf *Raft) heartbeat() {
 	}
 
 	now := time.Now()
-	for i := range rf.lastSentAppendEntries {
-		if i != rf.me && now.Sub(rf.lastSentAppendEntries[i]).Milliseconds() > int64(HEARTBEAT_MS) {
-			// time to send heartbeat
-			rf.sendAppendEntries(i, make([]LogEntry, 0))
-			rf.lastSentAppendEntries[i] = now
-			if rf.role != LEADER {
-				// This means we have become follower again
-				rf.mu.Unlock()
-				return
-			}
-		}
+	if now.Sub(rf.lastSentAppendEntries[server]).Milliseconds() > int64(HEARTBEAT_MS) {
+		// time to send heartbeat
+		rf.sendAppendEntries(server, make([]LogEntry, 0))
+		rf.lastSentAppendEntries[server] = now
 	}
-	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
+
 	rf.mu.Unlock()
-	rf.heartbeat()
+	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
+	rf.heartbeatOne(server)
+}
+
+// Sends heartbeats automatically if leader
+func (rf *Raft) heartbeat() {
+	for i := range rf.lastSentAppendEntries {
+		go rf.heartbeatOne(i)
+	}
 }
 
 func (rf *Raft) requestOneVote(server int) {
@@ -509,7 +538,7 @@ func (rf *Raft) requestOneVote(server int) {
 	}
 	if numVotes >= majority {
 		rf.role = LEADER
-		rf.print("Becoming leader! term: %v, votes: %v", rf.currentTerm, rf.hasVote)
+		rf.print(INFO, "Becoming leader! term: %v, votes: %v", rf.currentTerm, rf.hasVote)
 		rf.mu.Unlock()
 		rf.heartbeat()
 	} else {
