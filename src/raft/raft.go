@@ -30,7 +30,7 @@ import (
 	"6.824/labrpc"
 )
 
-var LOG_VERBOSITY int = INFO
+var LOG_VERBOSITY int = DEBUG
 var ERROR int = 4
 var WARN int = 3
 var INFO int = 2
@@ -347,10 +347,10 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
-		rf.print(DEBUG, "Sending appendEntries to %v (%v)", server, args)
+		rf.print(TRACE, "Sending appendEntries to %v (%v)", server, args)
 		ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 		if !ok {
-			rf.print(DEBUG, "failed to contact server %v for AppendEntries %v\n", rf.me, server, args)
+			rf.print(DEBUG, "failed to contact server %v for AppendEntries %v", server, args)
 			// Wait (don't send more heartbeats) and retry
 			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
 			continue
