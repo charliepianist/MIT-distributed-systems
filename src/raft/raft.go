@@ -30,13 +30,6 @@ import (
 	"6.824/labrpc"
 )
 
-var LOG_VERBOSITY int = DEBUG
-var ERROR int = 4
-var WARN int = 3
-var INFO int = 2
-var DEBUG int = 1
-var TRACE int = 0
-
 var HEARTBEAT_MS int = 150
 var ELECTION_TIMEOUT_MS_MIN int = 600
 var ELECTION_TIMEOUT_MS_MAX int = 750
@@ -104,11 +97,7 @@ type Raft struct {
 	hasVote []bool
 }
 
-func (rf *Raft) print(verbosity int, str string, a ...interface{}) {
-	if verbosity < LOG_VERBOSITY {
-		return
-	}
-
+func (rf *Raft) print(topic string, str string, a ...interface{}) {
 	roleStr := ""
 	switch rf.role {
 	case LEADER:
@@ -118,28 +107,16 @@ func (rf *Raft) print(verbosity int, str string, a ...interface{}) {
 	case CANDIDATE:
 		roleStr = "Candidate"
 	}
-	verbosityStr := ""
-	switch verbosity {
-	case ERROR:
-		verbosityStr = "ERROR"
-	case WARN:
-		verbosityStr = "WARN"
-	case INFO:
-		verbosityStr = "INFO"
-	case DEBUG:
-		verbosityStr = "DEBUG"
-	case TRACE:
-		verbosityStr = "TRACE"
-	}
 
 	now := time.Now()
 	timeStr := now.Format("15:04:05.000")
-	s := fmt.Sprintf("[%v] %v - %v (%v, Term %v) - %v\n", verbosityStr, timeStr, rf.me, roleStr, rf.currentTerm, str)
+	s := fmt.Sprintf("[%v] %v - %v (%v, Term %v) - %v\n", topic, timeStr, rf.me, roleStr, rf.currentTerm, str)
 	fmt.Printf(s, a...)
 }
 
 // If discovering new term or generally entering new term as follower, run this
 func (rf *Raft) updateTermAndReset(newTerm int) {
+	rf.print("STCH", "Found new term %v, going back to follower", newTerm)
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
 	rf.role = FOLLOWER
@@ -255,7 +232,8 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.print(INFO, "Received RequestVote from %v with term %v (existing term %v)", args.CandidateId, args.Term, rf.currentTerm)
+	rf.print("VOTE", "Received RequestVote from %v with term %v (existing term %v)", args.CandidateId, args.Term, rf.currentTerm)
+	defer rf.print("VOTE", "Voted %v", reply)
 	// Your code here (2A, 2B).
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
@@ -337,7 +315,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	entries := initialEntries
 
 	// Run until successful
-	for {
+	for rf.killed() == false {
 		// Or no longer leader
 		if rf.role != LEADER {
 			return
@@ -352,14 +330,18 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
-		rf.print(TRACE, "Sending appendEntries to %v (%v)", server, args)
+		rf.print("HTBT", "Sending appendEntries to %v (%v)", server, args)
+		rf.mu.Unlock()
 		ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
+
 		if !ok {
-			rf.print(DEBUG, "failed to contact server %v for AppendEntries %v", server, args)
+			rf.print("HTBT", "failed to contact server %v for AppendEntries %v", server, args)
 			// Wait (don't send more heartbeats) and retry
-			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
+			// time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
+			rf.mu.Lock()
 			continue
 		}
+		rf.mu.Lock()
 
 		// update next/matchIndex if successful
 		if reply.Success {
@@ -381,6 +363,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.print("HTBT", "Receiving appendEntries from %v", args.LeaderId)
 	rf.lastHeartbeat = time.Now()
 	reply.Success = false
 	reply.Term = rf.currentTerm
@@ -468,6 +451,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.print("KILL", "killed")
 }
 
 func (rf *Raft) killed() bool {
@@ -493,7 +477,9 @@ func (rf *Raft) heartbeatOne(server int) {
 
 	rf.mu.Unlock()
 	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
-	rf.heartbeatOne(server)
+	if rf.killed() == false {
+		rf.heartbeatOne(server)
+	}
 }
 
 // Sends heartbeats automatically if leader
@@ -512,6 +498,7 @@ func (rf *Raft) requestOneVote(server int) {
 		rf.mu.Unlock()
 		return
 	}
+	rf.print("CNDT", "Sending RequestVote to %v", server)
 
 	lastLogIndex := -1
 	lastLogTerm := -1
@@ -527,7 +514,14 @@ func (rf *Raft) requestOneVote(server int) {
 		LastLogTerm:  lastLogTerm,
 	}
 	reply := RequestVoteReply{}
+
+	// Do not hold lock while waiting
+	rf.mu.Unlock()
 	rf.sendRequestVote(server, &args, &reply)
+	if rf.role != CANDIDATE {
+		return
+	}
+	rf.mu.Lock()
 
 	// If term is greater, switch back to follower
 	if reply.Term > rf.currentTerm {
@@ -545,7 +539,7 @@ func (rf *Raft) requestOneVote(server int) {
 	}
 	if numVotes >= majority {
 		rf.role = LEADER
-		rf.print(INFO, "Becoming leader! term: %v, votes: %v", rf.currentTerm, rf.hasVote)
+		rf.print("STCH", "Becoming leader! term: %v, votes: %v", rf.currentTerm, rf.hasVote)
 		rf.mu.Unlock()
 		rf.heartbeat()
 	} else {
@@ -580,7 +574,7 @@ func (rf *Raft) ticker() {
 				rf.mu.Lock() // Lock so weird things don't happen
 				rf.role = CANDIDATE
 				rf.currentTerm++
-				rf.print(INFO, "becoming candidate!")
+				rf.print("STCH", "becoming candidate!")
 
 				// Vote for self
 				rf.votedFor = rf.me
@@ -643,6 +637,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.print("STRT", "started")
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
