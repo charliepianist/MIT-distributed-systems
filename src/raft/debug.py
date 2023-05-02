@@ -14,7 +14,8 @@ colors = {
     "HTBT": "#888888",
     "STCH": "#cccccc",
     "STRT": "#00ff00",
-    "KILL": "#ff0000"
+    "KILL": "#ff0000",
+    "STTS": "#00ffff",
 }
 
 # Parse file

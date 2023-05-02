@@ -37,7 +37,7 @@ var RETRY_APPEND_ENTRIES int = 0
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
-var PRINT_LOGS bool = true
+var PRINT_LOGS bool = false
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -347,6 +347,10 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			break
 		}
 		rf.mu.Lock()
+		if rf.role != LEADER {
+			rf.mu.Unlock()
+			return
+		}
 
 		// update next/matchIndex if successful
 		if reply.Success {
@@ -467,18 +471,14 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) heartbeatOne(server int) {
-	rf.mu.Lock()
-
 	// Stop if not leader
 	if rf.role != LEADER {
-		rf.mu.Unlock()
 		return
 	}
 
 	now := time.Now()
 	if now.Sub(rf.lastSentAppendEntries[server]).Milliseconds() > int64(HEARTBEAT_MS) {
 		// time to send heartbeat
-		rf.mu.Unlock()
 		go rf.sendAppendEntries(server, make([]LogEntry, 0))
 		rf.lastSentAppendEntries[server] = now
 	}
