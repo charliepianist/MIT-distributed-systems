@@ -33,10 +33,11 @@ import (
 var HEARTBEAT_MS int = 150
 var ELECTION_TIMEOUT_MS_MIN int = 600
 var ELECTION_TIMEOUT_MS_MAX int = 750
-var RETRY_APPEND_ENTRIES int = 225
+var RETRY_APPEND_ENTRIES int = 0
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
+var PRINT_LOGS bool = true
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -98,6 +99,10 @@ type Raft struct {
 }
 
 func (rf *Raft) print(topic string, str string, a ...interface{}) {
+	if !PRINT_LOGS {
+		return
+	}
+
 	roleStr := ""
 	switch rf.role {
 	case LEADER:
@@ -307,6 +312,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
+	rf.mu.Lock()
 	prevLogIndex, prevLogTerm := -1, -1
 	if len(rf.log) > 0 {
 		prevLogIndex = rf.nextIndex[server] - 1
@@ -337,9 +343,8 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		if !ok {
 			rf.print("HTBT", "failed to contact server %v for AppendEntries %v", server, args)
 			// Wait (don't send more heartbeats) and retry
-			// time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
-			rf.mu.Lock()
-			continue
+			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
+			break
 		}
 		rf.mu.Lock()
 
@@ -347,12 +352,14 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		if reply.Success {
 			rf.nextIndex[server] = len(entries) + prevLogTerm + 1
 			rf.matchIndex[server] = len(entries) + prevLogTerm
+			rf.mu.Unlock()
 			break
 		}
 
 		// Check if out of date (in which case, stop trying)
 		if reply.Term > rf.currentTerm {
 			rf.updateTermAndReset(reply.Term)
+			rf.mu.Unlock()
 			break
 		}
 
@@ -471,11 +478,11 @@ func (rf *Raft) heartbeatOne(server int) {
 	now := time.Now()
 	if now.Sub(rf.lastSentAppendEntries[server]).Milliseconds() > int64(HEARTBEAT_MS) {
 		// time to send heartbeat
-		rf.sendAppendEntries(server, make([]LogEntry, 0))
+		rf.mu.Unlock()
+		go rf.sendAppendEntries(server, make([]LogEntry, 0))
 		rf.lastSentAppendEntries[server] = now
 	}
 
-	rf.mu.Unlock()
 	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
 	if rf.killed() == false {
 		rf.heartbeatOne(server)
