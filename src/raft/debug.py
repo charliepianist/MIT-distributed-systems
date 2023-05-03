@@ -5,9 +5,12 @@ from datetime import time, datetime, date
 import sys
 
 skip_lock = False
+skip_trace = True
 for arg in sys.argv:
     if arg == 'skip-lock':
         skip_lock = True
+    if arg == 'show-trace':
+        skip_trace = False
 
 file = open('out')
 raw_output = file.read()
@@ -22,7 +25,11 @@ colors = {
     "STRT": "#00ff00",
     "KILL": "#ff0000",
     "STTS": "#00ffff",
-    "LOCK": "#444444"
+    "LOCK": "#444444",
+    "CMMT": "#FF69B4",
+    "CLNT": "#0000FF",
+    "LOGS": "#3948a1",
+    "TRCE": "#ffffff",
 }
 
 # Parse file
@@ -40,6 +47,8 @@ for line in lines:
         'msg': ' '.join(parts[8:])
     }
     if info['topic'] == 'LOCK' and skip_lock:
+        continue
+    if info['topic'] == 'TRCE' and skip_trace:
         continue
     if start_time is None:
         start_time = datetime.combine(date.today(), time.fromisoformat(info['time']))

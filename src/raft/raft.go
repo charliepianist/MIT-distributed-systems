@@ -350,7 +350,9 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	prevLogIndex, prevLogTerm := -1, -1
 	if len(rf.log) > 0 {
 		prevLogIndex = rf.nextIndex[server] - 1
-		prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
+		if prevLogIndex != -1 {
+			prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
+		}
 	}
 	entries := initialEntries
 
@@ -392,12 +394,18 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 		// update next/matchIndex if successful
 		if reply.Success {
-			newLogIndex := len(entries) + prevLogTerm
-			rf.nextIndex[server] = newLogIndex + 1
-			rf.matchIndex[server] = newLogIndex
+			newLogIndex := len(entries) + prevLogIndex
+			if newLogIndex+1 > rf.nextIndex[server] {
+				rf.nextIndex[server] = newLogIndex + 1
+			}
+			if newLogIndex > rf.matchIndex[server] {
+				rf.matchIndex[server] = newLogIndex
+			}
+			rf.print("TRCE", "Updating server %v nextIndex to %v, matchIndex to %v (prevLogIndex %v, newLogIndex %v, commitIndex %v)", server, rf.nextIndex[server], rf.matchIndex[server], prevLogIndex, newLogIndex, rf.commitIndex)
 			// Check if replicated on majority of servers
 			if majoritySatisfiesF(rf.matchIndex, func(i int) bool { return i >= newLogIndex }) {
 				if newLogIndex > rf.commitIndex {
+					rf.print("CMMT", "Committing up through %v", newLogIndex)
 					// Apply up thru committed
 					oldCommitIndex := rf.commitIndex
 					startIndex := -1
@@ -405,6 +413,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 						startIndex = len(rf.log) - 1 - (rf.log[len(rf.log)-1].LogIndex - oldCommitIndex)
 					}
 					rf.commitIndex = newLogIndex
+
 					for i := 1; i <= newLogIndex-oldCommitIndex; i++ {
 						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i}
 					}
@@ -430,7 +439,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.print("HTBT", "Receiving appendEntries from %v", args.LeaderId)
+	rf.print("HTBT", "Receiving appendEntries from %v - %v", args.LeaderId, args.Entries)
 	rf.print("LOCK", "Trying to lock in AppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in AppendEntries")
@@ -463,7 +472,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.log) > 0 {
 		idx := args.PrevLogIndex - rf.log[0].LogIndex
-		if len(rf.log) >= idx && rf.log[idx].Term != args.PrevLogTerm {
+		if idx >= 0 && len(rf.log) > idx && rf.log[idx].Term != args.PrevLogTerm {
 			rf.print("LOCK", "finished lock in AppendEntries")
 			rf.mu.Unlock()
 			return
@@ -473,14 +482,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i := range args.Entries {
 		idx := i + args.PrevLogIndex + 1
 		// Check if conflict
-		if len(rf.log) >= idx {
+		if idx < len(rf.log) {
 			if rf.log[idx].Term != args.Entries[i].Term {
+				rf.print("LOGS", "Chopping off log entries %v thru %v", idx, len(rf.log)-1)
 				rf.log = rf.log[:idx]
 			}
 		}
 
 		// Append log
-		if len(rf.log) < idx {
+		if idx >= len(rf.log) {
+			rf.print("LOGS", "Appending %v to log (starting at spot %v)", args.Entries, len(rf.log))
 			rf.log = append(rf.log, args.Entries[i:]...)
 		}
 	}
@@ -516,6 +527,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.print("CLNT", "Received command %v", command)
 	rf.print("LOCK", "Trying to lock in Start")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in Start")
@@ -531,13 +543,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Unlock()
 		return index, term, isLeader
 	}
+	rf.print("CLNT", "Actioning command %v", command)
 
 	// Append to log
 	newEntry := LogEntry{LogIndex: index, Term: term, Value: command}
 	rf.log = append(rf.log, newEntry)
 	// Tell all other servers to append
 	for i := range rf.peers {
-		go rf.sendAppendEntries(i, []LogEntry{newEntry})
+		if i != rf.me {
+			go rf.sendAppendEntries(i, []LogEntry{newEntry})
+		}
 	}
 
 	rf.print("LOCK", "finished lock in Start")
@@ -743,7 +758,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
-	rf.commitIndex = 0
+	rf.commitIndex = -1
 	rf.lastApplied = 0
 	rf.role = FOLLOWER
 	rf.applyCh = applyCh
