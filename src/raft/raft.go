@@ -65,6 +65,7 @@ type ApplyMsg struct {
 type LogEntry struct {
 	LogIndex int
 	Term     int
+	Value    interface{}
 }
 
 //
@@ -84,6 +85,7 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 	role        int
+	applyCh     chan ApplyMsg
 
 	// Leader state
 	nextIndex             []int
@@ -327,6 +329,20 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func majoritySatisfiesF[T interface{}](arr []T, f func(t T) bool) bool {
+	majority := len(arr)/2 + 1
+	count := 0
+	for i := range arr {
+		if f(arr[i]) {
+			count++
+			if count >= majority {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	rf.print("LOCK", "Trying to lock in sendAppendEntries")
 	rf.mu.Lock()
@@ -376,8 +392,24 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 		// update next/matchIndex if successful
 		if reply.Success {
-			rf.nextIndex[server] = len(entries) + prevLogTerm + 1
-			rf.matchIndex[server] = len(entries) + prevLogTerm
+			newLogIndex := len(entries) + prevLogTerm
+			rf.nextIndex[server] = newLogIndex + 1
+			rf.matchIndex[server] = newLogIndex
+			// Check if replicated on majority of servers
+			if majoritySatisfiesF(rf.matchIndex, func(i int) bool { return i >= newLogIndex }) {
+				if newLogIndex > rf.commitIndex {
+					// Apply up thru committed
+					oldCommitIndex := rf.commitIndex
+					startIndex := -1
+					if len(rf.log) > 0 {
+						startIndex = len(rf.log) - 1 - (rf.log[len(rf.log)-1].LogIndex - oldCommitIndex)
+					}
+					rf.commitIndex = newLogIndex
+					for i := 1; i <= newLogIndex-oldCommitIndex; i++ {
+						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i}
+					}
+				}
+			}
 			rf.print("LOCK", "finished lock in sendAppendEntries 2")
 			rf.mu.Unlock()
 			break
@@ -472,12 +504,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.print("LOCK", "Trying to lock in Start")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in Start")
+	index := 0
+	if len(rf.log) > 0 {
+		index = rf.log[len(rf.log)-1].LogIndex + 1
+	}
+	term := rf.currentTerm
+	isLeader := rf.role == LEADER
+	// If not leader, return false
+	if !isLeader {
+		rf.print("LOCK", "finished lock in Start")
+		rf.mu.Unlock()
+		return index, term, isLeader
+	}
 
-	// Your code here (2B).
+	// Append to log
+	newEntry := LogEntry{LogIndex: index, Term: term, Value: command}
+	rf.log = append(rf.log, newEntry)
+	// Tell all other servers to append
+	for i := range rf.peers {
+		go rf.sendAppendEntries(i, []LogEntry{newEntry})
+	}
 
+	rf.print("LOCK", "finished lock in Start")
+	rf.mu.Unlock()
 	return index, term, isLeader
 }
 
@@ -682,6 +734,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.role = FOLLOWER
+	rf.applyCh = applyCh
 
 	// Leader state
 	// TODO: This will have to be initialized to non-0 later
