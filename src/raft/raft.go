@@ -434,6 +434,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.print("LOCK", "Trying to lock in AppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in AppendEntries")
+	// Check if commitIndex is greater than this one. If so, apply up to there
+	if args.LeaderCommit > rf.commitIndex {
+		startIndex := 0
+		if len(rf.log) > 0 {
+			startIndex = len(rf.log) - (rf.log[len(rf.log)-1].LogIndex - rf.commitIndex)
+		}
+		for i := startIndex; i <= args.LeaderCommit; i++ {
+			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex}
+		}
+		rf.commitIndex = args.LeaderCommit
+	}
+
 	rf.lastHeartbeat = time.Now()
 	reply.Success = false
 	reply.Term = rf.currentTerm
