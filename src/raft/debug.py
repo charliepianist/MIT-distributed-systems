@@ -2,6 +2,12 @@ from rich import print
 from rich.columns import Columns
 from rich.console import Console
 from datetime import time, datetime, date
+import sys
+
+skip_lock = False
+for arg in sys.argv:
+    if arg == 'skip-lock':
+        skip_lock = True
 
 file = open('out')
 raw_output = file.read()
@@ -16,6 +22,7 @@ colors = {
     "STRT": "#00ff00",
     "KILL": "#ff0000",
     "STTS": "#00ffff",
+    "LOCK": "#444444"
 }
 
 # Parse file
@@ -32,6 +39,8 @@ for line in lines:
         'term': parts[6][:-1],
         'msg': ' '.join(parts[8:])
     }
+    if info['topic'] == 'LOCK' and skip_lock:
+        continue
     if start_time is None:
         start_time = datetime.combine(date.today(), time.fromisoformat(info['time']))
     td = (datetime.combine(date.today(), time.fromisoformat(info['time'])) - start_time)

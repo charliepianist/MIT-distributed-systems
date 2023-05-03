@@ -104,18 +104,19 @@ func (rf *Raft) print(topic string, str string, a ...interface{}) {
 	}
 
 	roleStr := ""
-	switch rf.role {
-	case LEADER:
-		roleStr = "Leader"
-	case FOLLOWER:
-		roleStr = "Follower"
-	case CANDIDATE:
-		roleStr = "Candidate"
-	}
+	// switch rf.role {
+	// case LEADER:
+	// 	roleStr = "Leader"
+	// case FOLLOWER:
+	// 	roleStr = "Follower"
+	// case CANDIDATE:
+	// 	roleStr = "Candidate"
+	// }
 
 	now := time.Now()
 	timeStr := now.Format("15:04:05.000")
-	s := fmt.Sprintf("[%v] %v - %v (%v, Term %v) - %v\n", topic, timeStr, rf.me, roleStr, rf.currentTerm, str)
+	// s := fmt.Sprintf("[%v] %v - %v (%v, Term %v) - %v\n", topic, timeStr, rf.me, roleStr, rf.currentTerm, str)
+	s := fmt.Sprintf("[%v] %v - %v (%v, Term %v) - %v\n", topic, timeStr, rf.me, roleStr, -1, str)
 	fmt.Printf(s, a...)
 }
 
@@ -130,11 +131,15 @@ func (rf *Raft) updateTermAndReset(newTerm int) {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
+	rf.print("LOCK", "Trying to lock in GetState")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in GetState")
 	term = rf.currentTerm
 	isleader = rf.role == LEADER
+	rf.print("LOCK", "finished lock in GetState")
+	rf.mu.Unlock()
 	// Your code here (2A).
 	return term, isleader
 }
@@ -237,13 +242,18 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	rf.print("VOTE", "Received RequestVote from %v with term %v (existing term %v)", args.CandidateId, args.Term, rf.currentTerm)
+	rf.print("VOTE", "Received RequestVote from %v with term %v", args.CandidateId, args.Term)
 	defer rf.print("VOTE", "Voted %v", reply)
 	// Your code here (2A, 2B).
+	rf.print("LOCK", "Trying to lock in RequestVote")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in RequestVote")
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 	// If candidate behind this one
 	if args.Term < rf.currentTerm {
+		rf.print("LOCK", "finished lock in RequestVote")
+		rf.mu.Unlock()
 		return
 	}
 
@@ -263,9 +273,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.LastLogTerm < lastTerm {
+		rf.print("LOCK", "finished lock in RequestVote")
+		rf.mu.Unlock()
 		return
 	}
 	if args.LastLogTerm == lastTerm && args.LastLogIndex < lastLogIndex {
+		rf.print("LOCK", "finished lock in RequestVote")
+		rf.mu.Unlock()
 		return
 	}
 
@@ -275,6 +289,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.lastVoteGrant = time.Now()
 	}
+	rf.print("LOCK", "finished lock in RequestVote")
+	rf.mu.Unlock()
 }
 
 //
@@ -312,7 +328,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
+	rf.print("LOCK", "Trying to lock in sendAppendEntries")
 	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in sendAppendEntries")
 	prevLogIndex, prevLogTerm := -1, -1
 	if len(rf.log) > 0 {
 		prevLogIndex = rf.nextIndex[server] - 1
@@ -337,6 +355,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		}
 		reply := AppendEntriesReply{}
 		rf.print("HTBT", "Sending appendEntries to %v (%v)", server, args)
+		rf.print("LOCK", "finished lock in sendAppendEntries")
 		rf.mu.Unlock()
 		ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
 
@@ -346,8 +365,11 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
 			break
 		}
+		rf.print("LOCK", "Trying to lock in sendAppendEntries 2")
 		rf.mu.Lock()
+		rf.print("LOCK", "succeeded to lock in sendAppendEntries 2")
 		if rf.role != LEADER {
+			rf.print("LOCK", "finished lock in sendAppendEntries 2")
 			rf.mu.Unlock()
 			return
 		}
@@ -356,6 +378,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		if reply.Success {
 			rf.nextIndex[server] = len(entries) + prevLogTerm + 1
 			rf.matchIndex[server] = len(entries) + prevLogTerm
+			rf.print("LOCK", "finished lock in sendAppendEntries 2")
 			rf.mu.Unlock()
 			break
 		}
@@ -363,6 +386,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		// Check if out of date (in which case, stop trying)
 		if reply.Term > rf.currentTerm {
 			rf.updateTermAndReset(reply.Term)
+			rf.print("LOCK", "finished lock in sendAppendEntries 2")
 			rf.mu.Unlock()
 			break
 		}
@@ -375,6 +399,9 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.print("HTBT", "Receiving appendEntries from %v", args.LeaderId)
+	rf.print("LOCK", "Trying to lock in AppendEntries")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in AppendEntries")
 	rf.lastHeartbeat = time.Now()
 	reply.Success = false
 	reply.Term = rf.currentTerm
@@ -385,12 +412,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Reply false if term < current term
 	if args.Term < rf.currentTerm {
+		rf.print("LOCK", "finished lock in AppendEntries")
+		rf.mu.Unlock()
 		return
 	}
 	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.log) > 0 {
 		idx := args.PrevLogIndex - rf.log[0].LogIndex
 		if len(rf.log) >= idx && rf.log[idx].Term != args.PrevLogTerm {
+			rf.print("LOCK", "finished lock in AppendEntries")
+			rf.mu.Unlock()
 			return
 		}
 	}
@@ -422,6 +453,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = newCommit
 	}
 	reply.Success = true
+	rf.print("LOCK", "finished lock in AppendEntries")
+	rf.mu.Unlock()
 }
 
 //
@@ -472,7 +505,12 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) heartbeatOne(server int) {
 	// Stop if not leader
+	rf.print("LOCK", "Trying to lock in heartbeatOne")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in heartbeatOne")
 	if rf.role != LEADER {
+		rf.print("LOCK", "finished lock in heartbeatOne")
+		rf.mu.Unlock()
 		return
 	}
 
@@ -483,6 +521,8 @@ func (rf *Raft) heartbeatOne(server int) {
 		rf.lastSentAppendEntries[server] = now
 	}
 
+	rf.print("LOCK", "finished lock in heartbeatOne")
+	rf.mu.Unlock()
 	time.Sleep(time.Duration(HEARTBEAT_MS) * time.Millisecond)
 	if rf.killed() == false {
 		rf.heartbeatOne(server)
@@ -499,9 +539,12 @@ func (rf *Raft) heartbeat() {
 }
 
 func (rf *Raft) requestOneVote(server int) {
+	rf.print("LOCK", "Trying to lock in requestOneVote")
 	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in requestOneVote")
 	// Don't do anything if no longer candidate
 	if rf.role != CANDIDATE {
+		rf.print("LOCK", "finished lock in requestOneVote")
 		rf.mu.Unlock()
 		return
 	}
@@ -523,12 +566,17 @@ func (rf *Raft) requestOneVote(server int) {
 	reply := RequestVoteReply{}
 
 	// Do not hold lock while waiting
+	rf.print("LOCK", "finished lock in requestOneVote")
 	rf.mu.Unlock()
 	rf.sendRequestVote(server, &args, &reply)
+	rf.print("LOCK", "Trying to lock in requestOneVote #2")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in requestOneVote #2")
 	if rf.role != CANDIDATE {
+		rf.print("LOCK", "finished lock in requestOneVote #2")
+		rf.mu.Unlock()
 		return
 	}
-	rf.mu.Lock()
 
 	// If term is greater, switch back to follower
 	if reply.Term > rf.currentTerm {
@@ -547,9 +595,11 @@ func (rf *Raft) requestOneVote(server int) {
 	if numVotes >= majority {
 		rf.role = LEADER
 		rf.print("STCH", "Becoming leader! term: %v, votes: %v", rf.currentTerm, rf.hasVote)
+		rf.print("LOCK", "finished lock in requestOneVote #2")
 		rf.mu.Unlock()
 		rf.heartbeat()
 	} else {
+		rf.print("LOCK", "finished lock in requestOneVote #2")
 		rf.mu.Unlock()
 	}
 }
@@ -573,12 +623,14 @@ func (rf *Raft) ticker() {
 		delay := rand.Intn(ELECTION_TIMEOUT_MS_MAX-ELECTION_TIMEOUT_MS_MIN+1) + ELECTION_TIMEOUT_MS_MIN
 
 		t := time.Now()
+		rf.print("LOCK", "Trying to lock in ticker")
+		rf.mu.Lock()
+		rf.print("LOCK", "succeeded to lock in ticker")
 		timeSinceLastHeartbeat := t.Sub(rf.lastHeartbeat)
 		timeSinceLastVoteGrant := t.Sub(rf.lastVoteGrant)
 		// Hasn't received heartbeat -> time to request votes
-		if timeSinceLastHeartbeat.Milliseconds() > int64(delay) && timeSinceLastVoteGrant.Milliseconds() > int64(delay) {
+		if timeSinceLastHeartbeat.Milliseconds() > int64(delay) && timeSinceLastVoteGrant.Milliseconds() > int64(delay) { // Lock so weird things don't happen
 			if rf.role == FOLLOWER || rf.role == CANDIDATE {
-				rf.mu.Lock() // Lock so weird things don't happen
 				rf.role = CANDIDATE
 				rf.currentTerm++
 				rf.print("STCH", "becoming candidate!")
@@ -588,10 +640,17 @@ func (rf *Raft) ticker() {
 				for i := range rf.hasVote {
 					rf.hasVote[i] = i == rf.me
 				}
+				rf.print("LOCK", "finished lock in ticker")
+				rf.mu.Unlock()
 				// Request votes
 				rf.requestVotes()
+			} else {
+				rf.print("LOCK", "finished lock in ticker")
 				rf.mu.Unlock()
 			}
+		} else {
+			rf.print("LOCK", "finished lock in ticker")
+			rf.mu.Unlock()
 		}
 
 		time.Sleep(time.Duration(delay) * time.Millisecond)
