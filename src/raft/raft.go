@@ -37,7 +37,9 @@ var RETRY_APPEND_ENTRIES int = 0
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
-var PRINT_LOGS bool = false
+var PRINT_LOGS bool = true
+var PRINT_LOCKS bool = false
+var PRINT_HTBT bool = false
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -102,6 +104,9 @@ type Raft struct {
 
 func (rf *Raft) print(topic string, str string, a ...interface{}) {
 	if !PRINT_LOGS {
+		return
+	}
+	if !PRINT_LOCKS && topic == "LOCK" {
 		return
 	}
 
@@ -351,6 +356,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	if len(rf.log) > 0 {
 		prevLogIndex = rf.nextIndex[server] - 1
 		if prevLogIndex != 0 {
+			rf.print("DBUG", "Getting prevLogTerm. log %v, prevLogIndex %v", rf.log, prevLogIndex)
 			prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
 		}
 	}
@@ -363,6 +369,12 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			return
 		}
 
+		// Catch up server if necessary
+		if len(rf.log) > 0 {
+			addtlStartIndex := (prevLogIndex + 1) - rf.log[0].LogIndex
+			addtlEntries := rf.log[addtlStartIndex:]
+			entries = append(addtlEntries, entries...)
+		}
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -372,7 +384,9 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
-		rf.print("HTBT", "Sending appendEntries to %v (%v)", server, args)
+		if len(entries) != 0 || PRINT_HTBT {
+			rf.print("HTBT", "Sending appendEntries to %v (%v)", server, args)
+		}
 		rf.print("LOCK", "finished lock in sendAppendEntries")
 		rf.mu.Unlock()
 		ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply)
@@ -381,7 +395,8 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			rf.print("HTBT", "failed to contact server %v for AppendEntries %v", server, args)
 			// Wait (don't send more heartbeats) and retry
 			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
-			break
+			rf.mu.Lock()
+			continue
 		}
 		rf.print("LOCK", "Trying to lock in sendAppendEntries 2")
 		rf.mu.Lock()
@@ -414,6 +429,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 					}
 					rf.commitIndex = newLogIndex
 
+					rf.print("DBUG", "Attempting to commit. prevLogIndex %v, startIndex %v, newLogIndex %v, oldCommitIndex %v. Log is %v long", prevLogIndex, startIndex, newLogIndex, oldCommitIndex, len(rf.log))
 					for i := 1; i <= newLogIndex-oldCommitIndex; i++ {
 						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i}
 					}
@@ -433,16 +449,20 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		}
 
 		// We know there was a failure
+		rf.print("DBUG", "reply %v", reply)
 		rf.nextIndex[server]--
 		entries = append([]LogEntry{rf.log[rf.nextIndex[server]]}, entries...)
 	}
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.print("HTBT", "Receiving appendEntries from %v - %v", args.LeaderId, args.Entries)
+	if len(args.Entries) != 0 || PRINT_HTBT {
+		rf.print("HTBT", "Receiving appendEntries from %v - %v.", args.LeaderId, args.Entries)
+	}
 	rf.print("LOCK", "Trying to lock in AppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in AppendEntries")
+	rf.print("DBUG", "In appendEntries. Log is currently %v", rf.log)
 
 	rf.lastHeartbeat = time.Now()
 	reply.Success = false
@@ -461,15 +481,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.log) > 0 {
 		idx := args.PrevLogIndex - rf.log[0].LogIndex
-		if idx >= 0 && len(rf.log) > idx && rf.log[idx].Term != args.PrevLogTerm {
+		if args.PrevLogIndex > 0 && (idx < 0 || idx >= len(rf.log) || rf.log[idx].Term != args.PrevLogTerm) {
 			rf.print("LOCK", "finished lock in AppendEntries")
 			rf.mu.Unlock()
 			return
 		}
+	} else if args.PrevLogIndex > 0 {
+		rf.print("LOCK", "finished lock in AppendEntries")
+		rf.mu.Unlock()
+		return
 	}
 
+	if len(args.Entries) > 0 {
+		rf.print("DBUG", "Going to try appending entries. log %v", rf.log)
+	}
 	for i := range args.Entries {
-		idx := i + args.PrevLogIndex + 1
+		idx := 0
+		if len(rf.log) > 0 {
+			idx = args.PrevLogIndex - rf.log[0].LogIndex + i + 1
+		}
 		// Check if conflict
 		if idx < len(rf.log) {
 			if rf.log[idx].Term != args.Entries[i].Term {
@@ -499,6 +529,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(rf.log) > 0 {
 			startIndex = len(rf.log) - (rf.log[len(rf.log)-1].LogIndex - rf.commitIndex)
 		}
+		rf.print("DBUG", "newestLogIndex %v, leaderCommit %v, startIndex %v, log %v", newestLogIndex, args.LeaderCommit, startIndex, rf.log)
 		for i := startIndex; i < len(rf.log) && rf.log[i].LogIndex <= newCommit; i++ {
 			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex}
 		}
@@ -544,11 +575,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Append to log
 	newEntry := LogEntry{LogIndex: index, Term: term, Value: command}
+	rf.print("LOGS", "Appending %v to log (starting at spot %v)", newEntry, len(rf.log))
 	rf.log = append(rf.log, newEntry)
+	rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].LogIndex
 	// Tell all other servers to append
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.sendAppendEntries(i, []LogEntry{newEntry})
+			go rf.sendAppendEntries(i, []LogEntry{})
 		}
 	}
 
@@ -763,6 +796,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Leader state
 	// TODO: This will have to be initialized to non-0 later
 	rf.nextIndex = make([]int, len(peers))
+	for i := range peers {
+		rf.nextIndex[i] = 1
+	}
 	rf.matchIndex = make([]int, len(peers))
 	rf.lastSentAppendEntries = make([]time.Time, len(peers))
 	now := time.Now()

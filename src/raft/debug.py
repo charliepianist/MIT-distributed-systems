@@ -30,6 +30,7 @@ colors = {
     "CLNT": "#0000FF",
     "LOGS": "#3948a1",
     "TRCE": "#ffffff",
+    "DBUG": "#ffc0cb",
 }
 
 # Parse file
