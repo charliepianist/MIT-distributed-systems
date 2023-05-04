@@ -347,10 +347,10 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	rf.print("LOCK", "Trying to lock in sendAppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in sendAppendEntries")
-	prevLogIndex, prevLogTerm := -1, -1
+	prevLogIndex, prevLogTerm := 0, -1
 	if len(rf.log) > 0 {
 		prevLogIndex = rf.nextIndex[server] - 1
-		if prevLogIndex != -1 {
+		if prevLogIndex != 0 {
 			prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
 		}
 	}
@@ -443,17 +443,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.print("LOCK", "Trying to lock in AppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in AppendEntries")
-	// Check if commitIndex is greater than this one. If so, apply up to there
-	if args.LeaderCommit > rf.commitIndex {
-		startIndex := 0
-		if len(rf.log) > 0 {
-			startIndex = len(rf.log) - (rf.log[len(rf.log)-1].LogIndex - rf.commitIndex)
-		}
-		for i := startIndex; i <= args.LeaderCommit; i++ {
-			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex}
-		}
-		rf.commitIndex = args.LeaderCommit
-	}
 
 	rf.lastHeartbeat = time.Now()
 	reply.Success = false
@@ -496,14 +485,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	// Check if commitIndex is greater than this one. If so, apply up to there
 	if args.LeaderCommit > rf.commitIndex {
 		newCommit := args.LeaderCommit
-		newestLogIndex := -1
+		newestLogIndex := 0
 		if len(rf.log) > 0 {
 			newestLogIndex = rf.log[len(rf.log)-1].LogIndex
 		}
-		if newestLogIndex > newCommit {
+		if newestLogIndex < newCommit {
 			newCommit = newestLogIndex
+		}
+		startIndex := 0
+		if len(rf.log) > 0 {
+			startIndex = len(rf.log) - (rf.log[len(rf.log)-1].LogIndex - rf.commitIndex)
+		}
+		for i := startIndex; i < len(rf.log) && rf.log[i].LogIndex <= newCommit; i++ {
+			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex}
 		}
 		rf.commitIndex = newCommit
 	}
@@ -531,7 +528,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.print("LOCK", "Trying to lock in Start")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in Start")
-	index := 0
+	index := 1
 	if len(rf.log) > 0 {
 		index = rf.log[len(rf.log)-1].LogIndex + 1
 	}
@@ -758,7 +755,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
-	rf.commitIndex = -1
+	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.role = FOLLOWER
 	rf.applyCh = applyCh
