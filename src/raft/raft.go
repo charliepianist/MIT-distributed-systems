@@ -37,7 +37,7 @@ var RETRY_APPEND_ENTRIES int = 0
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
-var PRINT_LOGS bool = true
+var PRINT_LOGS bool = false
 var PRINT_LOCKS bool = false
 var PRINT_HTBT bool = false
 
@@ -356,7 +356,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	if len(rf.log) > 0 {
 		prevLogIndex = rf.nextIndex[server] - 1
 		if prevLogIndex != 0 {
-			rf.print("DBUG", "Getting prevLogTerm. log %v, prevLogIndex %v", rf.log, prevLogIndex)
+			rf.print("DBUG", "Getting prevLogTerm for server %v. log %v, prevLogIndex %v", server, rf.log, prevLogIndex)
 			prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
 		}
 	}
@@ -366,6 +366,8 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 	for rf.killed() == false {
 		// Or no longer leader
 		if rf.role != LEADER {
+			rf.print("LOCK", "finished lock in sendAppendEntries")
+			rf.mu.Unlock()
 			return
 		}
 
@@ -395,6 +397,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			rf.print("HTBT", "failed to contact server %v for AppendEntries %v", server, args)
 			// Wait (don't send more heartbeats) and retry
 			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
+			rf.print("LOCK", "Trying to re-lock in sendAppendEntries")
 			rf.mu.Lock()
 			continue
 		}
@@ -409,7 +412,13 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 		// update next/matchIndex if successful
 		if reply.Success {
-			newLogIndex := len(entries) + prevLogIndex
+			newLogIndex := 0
+			if len(entries) > 0 {
+				newLogIndex = entries[len(entries)-1].LogIndex
+			} else if len(rf.log) > 0 {
+				newLogIndex = rf.log[len(rf.log)-1].LogIndex
+			}
+
 			if newLogIndex+1 > rf.nextIndex[server] {
 				rf.nextIndex[server] = newLogIndex + 1
 			}
