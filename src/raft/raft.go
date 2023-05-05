@@ -40,6 +40,7 @@ var LEADER int = 2
 var PRINT_LOGS bool = false
 var PRINT_LOCKS bool = false
 var PRINT_HTBT bool = false
+var PRINT_DBUG bool = true
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -107,6 +108,9 @@ func (rf *Raft) print(topic string, str string, a ...interface{}) {
 		return
 	}
 	if !PRINT_LOCKS && topic == "LOCK" {
+		return
+	}
+	if !PRINT_DBUG && topic == "DBUG" {
 		return
 	}
 
@@ -377,12 +381,17 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			addtlEntries := rf.log[addtlStartIndex:]
 			entries = append(addtlEntries, entries...)
 		}
+		sendEntries := make([]LogEntry, len(entries))
+		for i := range entries {
+			sendEntries[i] = entries[i]
+		}
+
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  prevLogTerm,
-			Entries:      entries,
+			Entries:      sendEntries,
 			LeaderCommit: rf.commitIndex,
 		}
 		reply := AppendEntriesReply{}
@@ -416,7 +425,9 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			if len(entries) > 0 {
 				newLogIndex = entries[len(entries)-1].LogIndex
 			} else if len(rf.log) > 0 {
-				newLogIndex = rf.log[len(rf.log)-1].LogIndex
+				if rf.matchIndex[server] > 0 {
+					newLogIndex = rf.log[rf.matchIndex[server]-rf.log[0].LogIndex].LogIndex
+				}
 			}
 
 			if newLogIndex+1 > rf.nextIndex[server] {
@@ -460,7 +471,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 		// We know there was a failure
 		rf.print("DBUG", "reply %v", reply)
 		rf.nextIndex[server]--
-		entries = append([]LogEntry{rf.log[rf.nextIndex[server]]}, entries...)
+		entries = append([]LogEntry{rf.log[rf.nextIndex[server]-rf.log[0].LogIndex]}, entries...)
 	}
 }
 
@@ -712,6 +723,10 @@ func (rf *Raft) requestOneVote(server int) {
 	}
 	if numVotes >= majority {
 		rf.role = LEADER
+		for i := range rf.nextIndex {
+			rf.nextIndex[i] = 1
+			rf.matchIndex[i] = 0
+		}
 		rf.print("STCH", "Becoming leader! term: %v, votes: %v", rf.currentTerm, rf.hasVote)
 		rf.print("LOCK", "finished lock in requestOneVote #2")
 		rf.mu.Unlock()
