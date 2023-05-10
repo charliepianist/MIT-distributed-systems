@@ -8,5 +8,5 @@ This is a repo of my solutions to the labs in MIT 6.824 Distributed Systems, whi
 - Lab 1: MapReduce: ~3 hours
 - Lab 2: Raft
     - 2A (leader election): ~5.5 hours
-    - 2B (log): ~3.5 hours
+    - 2B (log): ~4 hours
     - 2C (persistence):

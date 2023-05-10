@@ -245,8 +245,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term                  int
+	Success               bool
+	FirstIndexOfErrorTerm int
 }
 
 //
@@ -468,10 +469,18 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			break
 		}
 
-		// We know there was a failure
+		// We know there was a failure. Check if we can skip some entries
 		rf.print("DBUG", "reply %v", reply)
-		rf.nextIndex[server]--
-		entries = append([]LogEntry{rf.log[rf.nextIndex[server]-rf.log[0].LogIndex]}, entries...)
+		oldNextIndex := rf.nextIndex[server]
+		if reply.FirstIndexOfErrorTerm != 0 {
+			rf.nextIndex[server] = reply.FirstIndexOfErrorTerm
+		} else {
+			rf.nextIndex[server]--
+		}
+		startRealIndex := rf.nextIndex[server] - rf.log[0].LogIndex
+		entries = append(rf.log[startRealIndex:startRealIndex+oldNextIndex-rf.nextIndex[server]], entries...)
+		prevLogIndex = rf.nextIndex[server] - 1
+		prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
 	}
 }
 
@@ -502,6 +511,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(rf.log) > 0 {
 		idx := args.PrevLogIndex - rf.log[0].LogIndex
 		if args.PrevLogIndex > 0 && (idx < 0 || idx >= len(rf.log) || rf.log[idx].Term != args.PrevLogTerm) {
+			if idx >= 0 && idx < len(rf.log) {
+				// Conflicting entry
+				reply.FirstIndexOfErrorTerm = 1
+				conflictingTerm := rf.log[idx].Term
+				searchIdx := idx
+				for searchIdx >= 0 {
+					if rf.log[searchIdx].Term != conflictingTerm {
+						reply.FirstIndexOfErrorTerm = rf.log[searchIdx].LogIndex
+						break
+					}
+					searchIdx--
+				}
+			}
 			rf.print("LOCK", "finished lock in AppendEntries")
 			rf.mu.Unlock()
 			return
