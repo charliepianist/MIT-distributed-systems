@@ -42,7 +42,7 @@ var LEADER int = 2
 var PRINT_LOGS bool = false
 var PRINT_LOCKS bool = false
 var PRINT_HTBT bool = false
-var PRINT_DBUG bool = true
+var PRINT_DBUG bool = false
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -139,6 +139,7 @@ func (rf *Raft) updateTermAndReset(newTerm int) {
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
 	rf.role = FOLLOWER
+	rf.persist()
 }
 
 // return currentTerm and whether this server
@@ -306,6 +307,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.lastVoteGrant = time.Now()
+		rf.persist()
 	}
 	rf.print("LOCK", "finished lock in RequestVote")
 	rf.mu.Unlock()
@@ -562,6 +564,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log, args.Entries[i:]...)
 		}
 	}
+	rf.persist()
 
 	// Check if commitIndex is greater than this one. If so, apply up to there
 	if args.LeaderCommit > rf.commitIndex {
@@ -625,6 +628,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	newEntry := LogEntry{LogIndex: index, Term: term, Value: command}
 	rf.print("LOGS", "Appending %v to log (starting at spot %v)", newEntry, len(rf.log))
 	rf.log = append(rf.log, newEntry)
+	rf.persist()
 	rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].LogIndex
 	// Tell all other servers to append
 	for i := range rf.peers {
@@ -840,6 +844,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
+	data := rf.persister.ReadRaftState()
+	rf.readPersist(data)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.role = FOLLOWER
