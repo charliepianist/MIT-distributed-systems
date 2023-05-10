@@ -42,7 +42,7 @@ var LEADER int = 2
 var PRINT_LOGS bool = false
 var PRINT_LOCKS bool = false
 var PRINT_HTBT bool = false
-var PRINT_DBUG bool = false
+var PRINT_DBUG bool = true
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -361,7 +361,7 @@ func majoritySatisfiesF[T interface{}](arr []T, f func(t T) bool) bool {
 	return false
 }
 
-func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
+func (rf *Raft) sendAppendEntries(server int) {
 	rf.print("LOCK", "Trying to lock in sendAppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in sendAppendEntries")
@@ -373,7 +373,7 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 			prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
 		}
 	}
-	entries := initialEntries
+	entries := []LogEntry{}
 
 	// Run until successful
 	for rf.killed() == false {
@@ -386,9 +386,10 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 		// Catch up server if necessary
 		if len(rf.log) > 0 {
-			addtlStartIndex := (prevLogIndex + 1) - rf.log[0].LogIndex
-			addtlEntries := rf.log[addtlStartIndex:]
-			entries = append(addtlEntries, entries...)
+			startIndex := (prevLogIndex + 1) - rf.log[0].LogIndex
+			entries = rf.log[startIndex:]
+		} else {
+			entries = []LogEntry{}
 		}
 		sendEntries := make([]LogEntry, len(entries))
 		for i := range entries {
@@ -479,14 +480,11 @@ func (rf *Raft) sendAppendEntries(server int, initialEntries []LogEntry) {
 
 		// We know there was a failure. Check if we can skip some entries
 		rf.print("DBUG", "reply %v", reply)
-		oldNextIndex := rf.nextIndex[server]
 		if reply.FirstIndexOfErrorTerm != 0 {
 			rf.nextIndex[server] = reply.FirstIndexOfErrorTerm
 		} else {
 			rf.nextIndex[server]--
 		}
-		startRealIndex := rf.nextIndex[server] - rf.log[0].LogIndex
-		entries = append(rf.log[startRealIndex:startRealIndex+oldNextIndex-rf.nextIndex[server]], entries...)
 		prevLogIndex = rf.nextIndex[server] - 1
 		prevLogTerm = rf.log[prevLogIndex-rf.log[0].LogIndex].Term
 	}
@@ -561,6 +559,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// Append log
 		if idx >= len(rf.log) {
 			rf.print("LOGS", "Appending %v to log (starting at spot %v)", args.Entries, len(rf.log))
+			rf.log = rf.log[:idx]
 			rf.log = append(rf.log, args.Entries[i:]...)
 		}
 	}
@@ -633,7 +632,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Tell all other servers to append
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.sendAppendEntries(i, []LogEntry{})
+			go rf.sendAppendEntries(i)
 		}
 	}
 
@@ -678,7 +677,7 @@ func (rf *Raft) heartbeatOne(server int) {
 	now := time.Now()
 	if now.Sub(rf.lastSentAppendEntries[server]).Milliseconds() > int64(HEARTBEAT_MS) {
 		// time to send heartbeat
-		go rf.sendAppendEntries(server, make([]LogEntry, 0))
+		go rf.sendAppendEntries(server)
 		rf.lastSentAppendEntries[server] = now
 	}
 

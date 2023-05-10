@@ -83,3 +83,4 @@ if raw_output.split('\n')[-2][:2] == 'ok':
 else:
     print(raw_output.split('\n')[-6])
     print(raw_output.split('\n')[-5])
+    print(raw_output.split('\n')[-4])
