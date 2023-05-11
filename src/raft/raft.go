@@ -92,6 +92,10 @@ type Raft struct {
 	role        int
 	applyCh     chan ApplyMsg
 
+	// Snapshot state
+	lastIncludedTerm  int
+	lastIncludedIndex int
+
 	// Leader state
 	nextIndex             []int
 	matchIndex            []int
@@ -139,7 +143,7 @@ func (rf *Raft) updateTermAndReset(newTerm int) {
 	rf.currentTerm = newTerm
 	rf.votedFor = -1
 	rf.role = FOLLOWER
-	rf.persist()
+	rf.persist(nil)
 }
 
 // return currentTerm and whether this server
@@ -163,7 +167,7 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
-func (rf *Raft) persist() {
+func (rf *Raft) persist(snapshot []byte) {
 	// Your code here (2C).
 	// Example:
 	w := new(bytes.Buffer)
@@ -171,8 +175,10 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data, snapshot)
 }
 
 //
@@ -189,14 +195,20 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
 		panic("Failed to decode!")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -217,7 +229,18 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.print("LOCK", "Trying to lock in Snapshot")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in Snapshot")
 
+	indexInLog := index - rf.log[0].LogIndex
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.log[indexInLog].Term
+	rf.log = rf.log[indexInLog+1:]
+	rf.persist(snapshot)
+
+	rf.mu.Unlock()
+	rf.print("LOCK", "finished lock in Snapshot")
 }
 
 //
@@ -255,6 +278,56 @@ type AppendEntriesReply struct {
 	Term                  int
 	Success               bool
 	FirstIndexOfErrorTerm int
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.print("TRCE", "Received InstallSnapshot from %v", args.LeaderId)
+	rf.print("LOCK", "Trying to lock in InstallSnapshot")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in InstallSnapshot")
+
+	reply.Term = rf.currentTerm
+	// Reply immediately if term < currentTerm, or if old data
+	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.lastApplied {
+		rf.mu.Unlock()
+		rf.print("LOCK", "finished lock in InstallSnapshot")
+		return
+	}
+
+	// Check if term needs to be updated
+	if args.Term > rf.currentTerm {
+		rf.updateTermAndReset(args.Term)
+		reply.Term = args.Term
+	}
+
+	// If log does not contain the index or does not match
+	if len(rf.log) == 0 ||
+		rf.log[0].LogIndex-args.LastIncludedIndex >= len(rf.log) ||
+		rf.log[rf.log[0].LogIndex-args.LastIncludedIndex].Term != rf.lastIncludedTerm {
+		rf.log = []LogEntry{}
+	} else {
+		// Log contains a matching entry
+		indexInLog := rf.log[0].LogIndex - args.LastIncludedIndex
+		rf.log = rf.log[indexInLog+1:]
+	}
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.persist(args.Data)
+
+	rf.mu.Unlock()
+	rf.print("LOCK", "finished lock in InstallSnapshot")
 }
 
 //
@@ -307,7 +380,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.lastVoteGrant = time.Now()
-		rf.persist()
+		rf.persist(nil)
 	}
 	rf.print("LOCK", "finished lock in RequestVote")
 	rf.mu.Unlock()
@@ -463,6 +536,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 					for i := 1; i <= newLogIndex-oldCommitIndex; i++ {
 						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i}
 					}
+					rf.lastApplied = newLogIndex
 				}
 			}
 			rf.print("LOCK", "finished lock in sendAppendEntries 2")
@@ -563,7 +637,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log, args.Entries[i:]...)
 		}
 	}
-	rf.persist()
+	rf.persist(nil)
 
 	// Check if commitIndex is greater than this one. If so, apply up to there
 	if args.LeaderCommit > rf.commitIndex {
@@ -584,6 +658,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex}
 		}
 		rf.commitIndex = newCommit
+		rf.lastApplied = newCommit
 	}
 	reply.Success = true
 	rf.print("LOCK", "finished lock in AppendEntries")
@@ -627,7 +702,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	newEntry := LogEntry{LogIndex: index, Term: term, Value: command}
 	rf.print("LOGS", "Appending %v to log (starting at spot %v)", newEntry, len(rf.log))
 	rf.log = append(rf.log, newEntry)
-	rf.persist()
+	rf.persist(nil)
 	rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].LogIndex
 	// Tell all other servers to append
 	for i := range rf.peers {
@@ -843,6 +918,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 0)
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 	data := rf.persister.ReadRaftState()
 	rf.readPersist(data)
 	rf.commitIndex = 0
@@ -872,6 +949,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// TODO: maybe apply snapshot?
 
 	rf.print("STRT", "started")
 	// start ticker goroutine to start elections
