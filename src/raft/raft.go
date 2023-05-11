@@ -93,6 +93,7 @@ type Raft struct {
 	applyCh     chan ApplyMsg
 
 	// Snapshot state
+	lastSnapshot      []byte
 	lastIncludedTerm  int
 	lastIncludedIndex int
 
@@ -236,6 +237,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	indexInLog := index - rf.log[0].LogIndex
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.log[indexInLog].Term
+	rf.lastSnapshot = snapshot
 	rf.log = rf.log[indexInLog+1:]
 	rf.persist(snapshot)
 
@@ -324,6 +326,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.lastSnapshot = args.Data
 	rf.persist(args.Data)
 
 	rf.mu.Unlock()
@@ -434,6 +437,50 @@ func majoritySatisfiesF[T interface{}](arr []T, f func(t T) bool) bool {
 	return false
 }
 
+func (rf *Raft) sendInstallSnapshot(server int) {
+	rf.print("LOCK", "Trying to lock in sendInstallSnapshot")
+	rf.mu.Lock()
+	rf.print("LOCK", "succeeded to lock in sendInstallSnapshot")
+
+	// Run while leader and until successful
+	for rf.killed() == false && rf.role == LEADER {
+		args := InstallSnapshotArgs{
+			Term:              rf.currentTerm,
+			LeaderId:          rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			Data:              rf.lastSnapshot,
+		}
+		reply := InstallSnapshotReply{}
+		rf.print("LOCK", "finished lock in sendInstallSnapshot")
+		rf.mu.Unlock()
+		ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, &reply)
+
+		// Check for failure
+		if !ok {
+			rf.print("HTBT", "failed to contact server %v for InstallSnapshot %v", server, args)
+			time.Sleep(time.Duration(RETRY_APPEND_ENTRIES) * time.Millisecond)
+			rf.print("LOCK", "Trying to re-lock in sendInstallSnapshot")
+			rf.mu.Lock()
+			continue
+		}
+		rf.print("LOCK", "Trying to lock in sendInstallSnapshot 2")
+		rf.mu.Lock()
+		rf.print("LOCK", "Succeeded to lock in sendInstallSnapshot 2")
+		// Check if behind in term
+		if reply.Term > rf.currentTerm {
+			rf.updateTermAndReset(reply.Term)
+			continue
+		}
+
+		// Success
+		break
+	}
+
+	rf.print("LOCK", "finished lock in sendInstallSnapshot")
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) sendAppendEntries(server int) {
 	rf.print("LOCK", "Trying to lock in sendAppendEntries")
 	rf.mu.Lock()
@@ -458,9 +505,18 @@ func (rf *Raft) sendAppendEntries(server int) {
 		}
 
 		// Catch up server if necessary
-		if len(rf.log) > 0 {
-			startIndex := (prevLogIndex + 1) - rf.log[0].LogIndex
-			entries = rf.log[startIndex:]
+		if len(rf.log) > 0 || rf.lastIncludedIndex > 0 {
+			// Check if we need to install snapshot
+			if prevLogIndex < rf.lastIncludedIndex || (prevLogIndex+1)-rf.log[0].LogIndex < 0 {
+				// Send snapshot
+				rf.print("LOCK", "finished lock in sendAppendEntries")
+				rf.mu.Unlock()
+				go rf.sendInstallSnapshot(server)
+				break
+			} else {
+				// Just some entries to add
+				entries = rf.log[(prevLogIndex+1)-rf.log[0].LogIndex:]
+			}
 		} else {
 			entries = []LogEntry{}
 		}
@@ -922,6 +978,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastIncludedTerm = 0
 	data := rf.persister.ReadRaftState()
 	rf.readPersist(data)
+	rf.lastSnapshot = rf.persister.ReadSnapshot()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.role = FOLLOWER
