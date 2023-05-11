@@ -10,4 +10,4 @@ This is a repo of my solutions to the labs in MIT 6.824 Distributed Systems, whi
     - 2A (leader election): ~5.5 hours
     - 2B (log): ~4 hours
     - 2C (persistence): ~0.75 hours
-    - 2D (log compaction): ~1.5 hours so far
+    - 2D (log compaction): ~2.75 hours so far

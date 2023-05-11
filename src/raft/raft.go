@@ -39,8 +39,8 @@ var RETRY_APPEND_ENTRIES int = 0
 var FOLLOWER int = 0
 var CANDIDATE int = 1
 var LEADER int = 2
-var PRINT_LOGS bool = false
-var PRINT_LOCKS bool = false
+var PRINT_LOGS bool = true
+var PRINT_LOCKS bool = true
 var PRINT_HTBT bool = false
 var PRINT_DBUG bool = true
 
@@ -240,6 +240,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastSnapshot = snapshot
 	rf.log = rf.log[indexInLog+1:]
 	rf.persist(snapshot)
+	rf.applyCh <- ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      snapshot,
+		SnapshotTerm:  rf.lastIncludedTerm,
+		SnapshotIndex: rf.lastIncludedIndex,
+	}
 
 	rf.mu.Unlock()
 	rf.print("LOCK", "finished lock in Snapshot")
@@ -303,8 +310,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	reply.Term = rf.currentTerm
 	// Reply immediately if term < currentTerm, or if old data
 	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.lastApplied {
-		rf.mu.Unlock()
 		rf.print("LOCK", "finished lock in InstallSnapshot")
+		rf.mu.Unlock()
 		return
 	}
 
@@ -316,8 +323,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	// If log does not contain the index or does not match
 	if len(rf.log) == 0 ||
-		rf.log[0].LogIndex-args.LastIncludedIndex >= len(rf.log) ||
-		rf.log[rf.log[0].LogIndex-args.LastIncludedIndex].Term != rf.lastIncludedTerm {
+		args.LastIncludedIndex-rf.log[0].LogIndex >= len(rf.log) ||
+		rf.log[args.LastIncludedIndex-rf.log[0].LogIndex].Term != rf.lastIncludedTerm {
 		rf.log = []LogEntry{}
 	} else {
 		// Log contains a matching entry
@@ -328,9 +335,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.lastSnapshot = args.Data
 	rf.persist(args.Data)
+	rf.applyCh <- ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  rf.lastIncludedTerm,
+		SnapshotIndex: rf.lastIncludedIndex,
+	}
 
-	rf.mu.Unlock()
 	rf.print("LOCK", "finished lock in InstallSnapshot")
+	rf.mu.Unlock()
 }
 
 //
@@ -590,7 +604,7 @@ func (rf *Raft) sendAppendEntries(server int) {
 
 					rf.print("DBUG", "Attempting to commit. prevLogIndex %v, startIndex %v, newLogIndex %v, oldCommitIndex %v. Log is %v long", prevLogIndex, startIndex, newLogIndex, oldCommitIndex, len(rf.log))
 					for i := 1; i <= newLogIndex-oldCommitIndex; i++ {
-						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i}
+						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i, SnapshotValid: false}
 					}
 					rf.lastApplied = newLogIndex
 				}
@@ -627,7 +641,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.print("LOCK", "Trying to lock in AppendEntries")
 	rf.mu.Lock()
 	rf.print("LOCK", "succeeded to lock in AppendEntries")
-	rf.print("DBUG", "In appendEntries. Log is currently %v", rf.log)
+	if len(args.Entries) != 0 {
+		rf.print("DBUG", "In appendEntries with non-empty message. Log is currently %v", rf.log)
+	}
 
 	rf.lastHeartbeat = time.Now()
 	reply.Success = false
@@ -711,7 +727,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.print("DBUG", "newestLogIndex %v, leaderCommit %v, startIndex %v, log %v", newestLogIndex, args.LeaderCommit, startIndex, rf.log)
 		for i := startIndex; i < len(rf.log) && rf.log[i].LogIndex <= newCommit; i++ {
-			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex}
+			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex, SnapshotValid: false}
 		}
 		rf.commitIndex = newCommit
 		rf.lastApplied = newCommit
