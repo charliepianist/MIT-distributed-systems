@@ -73,6 +73,11 @@ type LogEntry struct {
 	Value    interface{}
 }
 
+type ToCommit struct {
+	entries 	[]LogEntry
+	lastIndex	int
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -84,13 +89,15 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
-	currentTerm int
-	votedFor    int
-	log         []LogEntry
-	commitIndex int
-	lastApplied int
-	role        int
-	applyCh     chan ApplyMsg
+	currentTerm 			int
+	votedFor    			int
+	log         			[]LogEntry
+	commitIndex 			int
+	lastApplied 			int // The last log index which has been sent to commitCh and "applied"
+	lastAppliedCompleted 	int // The last log index that was actually sent to applyCh
+	role        			int
+	applyCh     			chan ApplyMsg
+	commitCh 				chan ToCommit
 
 	// Snapshot state
 	lastSnapshot      []byte
@@ -601,12 +608,12 @@ func (rf *Raft) sendAppendEntries(server int) {
 						startIndex = len(rf.log) - 1 - (rf.log[len(rf.log)-1].LogIndex - oldCommitIndex)
 					}
 					rf.commitIndex = newLogIndex
-
-					rf.print("DBUG", "Attempting to commit. prevLogIndex %v, startIndex %v, newLogIndex %v, oldCommitIndex %v. Log is %v long", prevLogIndex, startIndex, newLogIndex, oldCommitIndex, len(rf.log))
-					for i := 1; i <= newLogIndex-oldCommitIndex; i++ {
-						rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[startIndex+i].Value, CommandIndex: oldCommitIndex + i, SnapshotValid: false}
-					}
 					rf.lastApplied = newLogIndex
+					rf.print("DBUG", "Attempting to commit. prevLogIndex %v, startIndex %v, newLogIndex %v, oldCommitIndex %v. Log is %v long", prevLogIndex, startIndex, newLogIndex, oldCommitIndex, len(rf.log))
+					rf.commitCh <- ToCommit{
+						entries: rf.log[startIndex+1:startIndex+newLogIndex-oldCommitIndex+1],
+						lastIndex: newLogIndex,
+					}
 				}
 			}
 			rf.print("LOCK", "finished lock in sendAppendEntries 2")
@@ -725,12 +732,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if len(rf.log) > 0 {
 			startIndex = len(rf.log) - (rf.log[len(rf.log)-1].LogIndex - rf.commitIndex)
 		}
-		rf.print("DBUG", "newestLogIndex %v, leaderCommit %v, startIndex %v, log %v", newestLogIndex, args.LeaderCommit, startIndex, rf.log)
-		for i := startIndex; i < len(rf.log) && rf.log[i].LogIndex <= newCommit; i++ {
-			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Value, CommandIndex: rf.log[i].LogIndex, SnapshotValid: false}
-		}
 		rf.commitIndex = newCommit
 		rf.lastApplied = newCommit
+		rf.print("DBUG", "newestLogIndex %v, leaderCommit %v, startIndex %v, log %v", newestLogIndex, args.LeaderCommit, startIndex, rf.log)
+		
+		lastIndex := newCommit - rf.log[0].logIndex
+		if lastIndex > len(rf.log) - 1 {
+			lastIndex = len(rf.log) - 1
+		}
+
+		rf.commitCh <- ToCommit{
+			entries: rf.log[startIndex:lastIndex+1],
+			lastIndex: newLogIndex,
+		}
 	}
 	reply.Success = true
 	rf.print("LOCK", "finished lock in AppendEntries")
@@ -968,6 +982,23 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) doApply() {
+	toCommit := <- rf.commitCh
+	// Check if this hasn't already been applied
+	if toCommit.lastIndex > rf.lastAppliedCompleted {
+		for i := len(toCommit.entries) - (toCommit.lastIndex - rf.lastAppliedCompleted); i < len(toCommit.entries); i++ {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command: toCommit.entries[i].Value,
+				CommandIndex: toCommit.entries[i].LogIndex,
+				SnapshotValid: false
+			}
+		}
+	}
+
+	rf.doApply()
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -997,8 +1028,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastSnapshot = rf.persister.ReadSnapshot()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.lastAppliedCompleted = 0
 	rf.role = FOLLOWER
 	rf.applyCh = applyCh
+	rf.commitCh = make(chan ToCommit)
 
 	// Leader state
 	// TODO: This will have to be initialized to non-0 later
@@ -1027,6 +1060,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.print("STRT", "started")
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.doApply()
 
 	return rf
 }
